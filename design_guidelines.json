@@ -1,0 +1,119 @@
+{
+  "project_name": "Taqada",
+  "theme": "light",
+  "typography": {
+    "font_families": {
+      "headings": "'Fraunces', serif",
+      "body": "'Cabinet Grotesk', sans-serif",
+      "data_and_mono": "'IBM Plex Mono', monospace"
+    },
+    "hierarchy": {
+      "h1": "text-5xl lg:text-6xl tracking-tighter leading-none font-medium font-['Fraunces'] text-ink",
+      "h2": "text-2xl lg:text-3xl tracking-tight font-medium font-['Fraunces'] text-ink",
+      "h3": "text-xl tracking-tight font-medium font-['Cabinet_Grotesk'] text-ink",
+      "hero_number": "text-6xl lg:text-7xl tracking-tighter font-medium font-['Fraunces'] text-forest",
+      "body": "text-base leading-relaxed font-normal font-['Cabinet_Grotesk'] text-ink/80",
+      "data_large": "text-2xl font-medium font-['IBM_Plex_Mono'] text-ink tracking-tight",
+      "data_small": "text-sm font-medium font-['IBM_Plex_Mono'] text-ink/70 uppercase tracking-[0.05em]",
+      "badge": "text-xs font-semibold font-['IBM_Plex_Mono'] uppercase tracking-wider"
+    },
+    "instructions": "Use Fraunces exclusively for main headings and the large 'Recovered this week' counter. Use IBM Plex Mono for all financial amounts (₹), dates, Udyam badges, and Section 43B(h) citations to give a 'tax code / ledger' authoritative aesthetic. Cabinet Grotesk serves as the workhorse for general UI text."
+  },
+  "colors": {
+    "palette": {
+      "background": {
+        "primary": "#F9F6F0",
+        "secondary": "#FFFFFF",
+        "tertiary": "#EBE7DD"
+      },
+      "text": {
+        "primary": "#0A1128",
+        "secondary": "#3A435E",
+        "tertiary": "#6B7280"
+      },
+      "accent": {
+        "terracotta": "#C84B31",
+        "marigold": "#D97706",
+        "forest": "#1B4332",
+        "ink": "#0A1128"
+      },
+      "status": {
+        "friendly": "#3B82F6",
+        "firm": "#D97706",
+        "statutory": "#C84B31",
+        "recovered": "#1B4332"
+      }
+    },
+    "instructions": "Avoid all generic SaaS blues and 'AI' purples. The app should feel like a modern, digital ledger on high-quality parchment. Primary background is a warm cream (#F9F6F0). Surfaces are white with a 1px solid border (#EBE7DD). Accents are earthy and authoritative: Terracotta for escalations, Forest Green for recoveries. Text must be Deep Ink, never pure black or muddy gray."
+  },
+  "visual_enhancers": {
+    "borders": "1px solid border-ink/10. Use 'Grid Borders' pattern for tables and data-heavy sections (border-collapse, borders on right/bottom only).",
+    "shadows": "Minimal. Rely on 1px borders for structure. For floating elements (drawers/modals), use a sharp drop shadow: shadow-[4px_4px_0px_rgba(10,17,40,0.1)].",
+    "surfaces": "Flat solid surfaces only. No glassmorphism. This is a B2B finance and legal tool—transparency and blur reduce legibility and seriousness.",
+    "textures": "Optional: very subtle SVG noise overlay on the primary background to simulate paper/ledger feel (opacity 2%)."
+  },
+  "layout_and_spacing": {
+    "general": "High Density Grid for the dashboard. Generous spacing (p-8 to p-12) for outer wrappers, tight spacing (p-4 to p-6) within cards.",
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6.",
+    "widget_spans": {
+      "recovered_hero": "col-span-1 lg:col-span-1 row-span-1 (Tall or wide depending on layout)",
+      "aging_buckets": "col-span-1 md:col-span-2 lg:col-span-2 row-span-1",
+      "activity_feed": "col-span-1 lg:col-span-2 row-span-2",
+      "escalation_queue": "col-span-1 lg:col-span-2 row-span-2"
+    },
+    "alignment": "Optical alignment over geometrical. Left-align data tables, forms, and paragraphs. Only center empty states."
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-ink text-primary hover:bg-ink/90 font-['Cabinet_Grotesk'] rounded-none border border-ink px-6 py-2 transition-colors",
+      "secondary": "bg-primary text-ink hover:bg-tertiary font-['Cabinet_Grotesk'] rounded-none border border-ink/20 px-6 py-2 transition-colors",
+      "accent": "bg-terracotta text-white hover:bg-terracotta/90 rounded-none border border-terracotta px-6 py-2 transition-colors"
+    },
+    "badges": {
+      "rung_1": "bg-blue-50 text-blue-700 border border-blue-200 px-2 py-1",
+      "rung_2": "bg-marigold/10 text-marigold border border-marigold/20 px-2 py-1",
+      "rung_3": "bg-terracotta/10 text-terracotta border border-terracotta/20 px-2 py-1",
+      "udyam": "bg-ink/5 text-ink border border-ink/10 px-2 py-1 font-['IBM_Plex_Mono'] uppercase"
+    },
+    "cards": "bg-white border border-ink/10 rounded-none p-6. Never use default Shadcn rounded borders. Make them sharp and rectangular.",
+    "tables": "Dense. Header text uses IBM Plex Mono uppercase text-xs. Cells have border-b border-ink/10. Zebra striping with bg-primary/30 for alternate rows.",
+    "drawer_modal": "bg-white border-l border-ink/10 shadow-2xl. Backdrop must be bg-ink/60 (solid tinted gray, no full transparency)."
+  },
+  "icons_and_media": {
+    "library": "@phosphor-icons/react",
+    "style": "Duotone or Regular weight. Sharp, professional.",
+    "instructions": "Use Phosphor icons. Install via `yarn add @phosphor-icons/react`. Do not use emojis."
+  },
+  "motion": {
+    "transitions": "Fast and crisp. duration-150 ease-out. No bouncy animations.",
+    "interactions": "Hover states on all rows and buttons. Subtle background color shift (bg-primary to bg-tertiary).",
+    "feed": "New items in the activity feed should slide down and fade in (framer-motion y: -10, opacity: 0 -> y: 0, opacity: 1)."
+  },
+  "accessibility": {
+    "contrast": "Strict APCA/WCAG AA compliance. Dark Ink against Cream/White has high contrast.",
+    "data_testid": "MANDATORY. Add `data-testid` to all interactive elements (buttons, inputs, table rows, tabs, preview toggles).",
+    "focus": "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-primary"
+  },
+  "specific_features": {
+    "invoice_ledger": "Must display ₹ amounts formatted in Indian Number System (e.g., ₹1,50,000). Highlight overdue days in Terracotta if >45 days, Marigold if 16-45, Ink if <=15.",
+    "control_strip": "Sticky bar at the top or bottom for demo controls ('Run agent tick', 'Simulate reply', 'Mark paid'). Use a distinct background (e.g., bg-ink text-white) to separate it from the real UI.",
+    "message_preview": "Use a monospace font block for the statutory message (Rung 3) to emphasize the 'legal/tax code' nature. Include Section 43B(h) and MSMED Act citations prominently.",
+    "charts": "Use Shadcn charts (Recharts) for the Aging Buckets. Colors: Current (Ink/20), 1-15 (Ink/40), 16-45 (Marigold), 46-90 (Terracotta), 90+ (Red)."
+  },
+  "universal_guidelines": [
+    "You tend to converge toward generic, 'on distribution' outputs. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "DO NOT use generic centered layouts. Left-align for reading flow.",
+    "Create depth through 1px sharp borders and typography contrast, NOT generic drop shadows.",
+    "NEVER use AI assistant Emoji characters.",
+    "All interactive and key informational elements MUST include a `data-testid` attribute (e.g., `data-testid='invoice-row-123'`).",
+    "Use standard Indian numerical format (lakhs/crores) for all ₹ values.",
+    "Do NOT use complete transparent background in header, overlays, or dropdowns. Ensure solid backgrounds for readability."
+  ],
+  "instructions_to_main_agent": [
+    "Initialize standard Shadcn components but override their radii to `rounded-none` and customize colors to match the Parchment/Ink palette.",
+    "Install required fonts from Google Fonts: Fraunces, Cabinet Grotesk (or similar geometric sans if unavailable, like Space Grotesk/Inter as fallback ONLY if Cabinet fails, but prioritize a sharp sans), IBM Plex Mono.",
+    "Build the 4-widget dashboard as the hero view. Ensure the 'Recovered this week' counter is massive and emotionally impactful.",
+    "Implement the tone ladder badges (1, 2, 3) with distinct colors.",
+    "Ensure the Demo Mode control strip is clearly visible and functional."
+  ]
+}
