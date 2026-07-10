@@ -67,15 +67,28 @@ export default function Dashboard() {
           <div className="hidden md:flex items-center gap-6 font-mono-data text-[10px] uppercase tracking-widest text-ink/60">
             {config && (
               <>
-                <span data-testid="cfg-rbi-rate">RBI bank rate · {config.rbi_bank_rate_percent}%</span>
+                <span data-testid="cfg-rbi-rate">RBI · {config.rbi_bank_rate_percent}%</span>
                 <span data-testid="cfg-llm">LLM · {config.llm.backend}</span>
                 <span
                   data-testid="cfg-razorpay"
                   className={config.razorpay?.enabled ? "text-forest" : "text-ink/50"}
                 >
-                  Razorpay · {config.razorpay?.enabled ? "live (test mode)" : "off"}
+                  Razorpay · {config.razorpay?.enabled ? "test" : "off"}
                 </span>
-                <span className="text-forest">Demo mode</span>
+                <span
+                  data-testid="cfg-channel"
+                  className={
+                    config.messaging?.active === "whatsapp"
+                      ? "text-forest"
+                      : config.messaging?.active === "telegram"
+                      ? "text-forest"
+                      : "text-ink/50"
+                  }
+                >
+                  Channel · {config.messaging?.active}
+                  {config.messaging?.telegram?.bot_username &&
+                    ` (@${config.messaging.telegram.bot_username})`}
+                </span>
               </>
             )}
           </div>

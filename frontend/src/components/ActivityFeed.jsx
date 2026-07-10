@@ -104,6 +104,20 @@ export default function ActivityFeed({ items, onOpenInvoice }) {
                 >
                   {it.invoice_number}
                 </button>
+                {it.type === "outbound" && it.channel && (
+                  <span
+                    className={`font-mono-data text-[9px] uppercase tracking-wider px-1.5 py-0.5 border ${
+                      it.delivered
+                        ? "text-forest border-forest/30 bg-forest/5"
+                        : it.channel === "demo"
+                        ? "text-ink/50 border-ink/15 bg-ink/5"
+                        : "text-terracotta border-terracotta/30 bg-terracotta/5"
+                    }`}
+                    title={it.delivery_error || (it.delivered ? "delivered" : "not delivered")}
+                  >
+                    {it.delivered ? "✓" : "!"} {it.channel}
+                  </span>
+                )}
                 <span className="font-mono-data text-[10px] text-ink/50 ml-auto">
                   {relativeTime(it.at)}
                 </span>

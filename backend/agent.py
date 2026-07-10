@@ -19,6 +19,7 @@ from aging import (
 )
 from config import MAX_EXTENSION_DAYS
 from llm import classify_reply, generate_chase_message
+import messaging
 import razorpay_client
 
 log = logging.getLogger("taqada.agent")
@@ -55,13 +56,16 @@ async def ensure_payment_link(db, invoice: dict) -> dict:
     return link
 
 
-async def _log_chase(db, invoice: dict, rung: int, message: str) -> dict:
+async def _log_chase(db, invoice: dict, rung: int, message: str, delivery: dict | None = None) -> dict:
     ev = {
         "id": str(uuid.uuid4()),
         "invoice_id": invoice["id"],
         "debtor_id": invoice["debtor_id"],
         "rung": rung,
-        "channel": "whatsapp_demo",
+        "channel": (delivery or {}).get("channel", "demo"),
+        "delivered": bool((delivery or {}).get("delivered")),
+        "delivery_target": (delivery or {}).get("target"),
+        "delivery_error": (delivery or {}).get("error"),
         "message_text": message,
         "sent_at": _now_iso(),
     }
@@ -99,9 +103,21 @@ async def chase_invoice(db, invoice: dict) -> dict:
         "formatted_interest": format_inr(interest),
     }
     message = generate_chase_message(effective_rung, ctx)
-    ev = await _log_chase(db, invoice, effective_rung, message)
+
+    # Attempt real delivery on the active channel (best-effort; never raises)
+    delivery = await messaging.send_chase(debtor, message)
+    # Track last outbound invoice per debtor — used to route inbound Telegram
+    # replies to the right invoice.
+    if delivery.get("channel") == "telegram" and delivery.get("delivered"):
+        await db.debtors.update_one(
+            {"id": debtor["id"]},
+            {"$set": {"last_outbound_invoice_id": invoice["id"]}},
+        )
+
+    ev = await _log_chase(db, invoice, effective_rung, message, delivery)
     ev["payment_link"] = link
-    return {"skipped": False, "chase_event": ev, "rung": effective_rung}
+    ev["delivery"] = delivery
+    return {"skipped": False, "chase_event": ev, "rung": effective_rung, "delivery": delivery}
 
 
 async def run_agent_tick(db) -> dict:
@@ -143,11 +159,19 @@ async def run_agent_tick(db) -> dict:
     return {"chased": len(events), "events": events, "scanned": len(invoices)}
 
 
+async def _send_and_log(db, inv: dict, debtor: dict, message: str) -> dict:
+    """Send an outbound reply/negotiation message to the debtor + log it."""
+    delivery = await messaging.send_chase(debtor, message)
+    return await _log_chase(db, inv, 0, message, delivery)
+
+
 async def handle_inbound_reply(db, invoice_id: str, text: str) -> dict:
     """Route inbound message: classify → act."""
     inv = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
     if not inv:
         raise ValueError(f"invoice {invoice_id} not found")
+
+    debtor = await _get_debtor(db, inv["debtor_id"]) or {}
 
     classification = classify_reply(text)
     intent = classification["intent"]
@@ -177,7 +201,6 @@ async def handle_inbound_reply(db, invoice_id: str, text: str) -> dict:
 
         max_allowed = today + timedelta(days=MAX_EXTENSION_DAYS)
         if promised_date > max_allowed:
-            # counter-offer
             counter = max_allowed
             response_message = (
                 f"Thanks for the update. {promised_date.isoformat()} is a bit far out — "
@@ -185,7 +208,6 @@ async def handle_inbound_reply(db, invoice_id: str, text: str) -> dict:
             )
             promised_date = counter
 
-        # log promise
         await db.promises.insert_one({
             "id": str(uuid.uuid4()),
             "invoice_id": invoice_id,
@@ -202,8 +224,7 @@ async def handle_inbound_reply(db, invoice_id: str, text: str) -> dict:
                 f"Noted, thank you. We'll expect payment by {promised_date.isoformat()}. "
                 f"A confirmation link is on the way."
             )
-        # log outbound as chase_event rung=0 (negotiation)
-        await _log_chase(db, inv, 0, response_message)
+        await _send_and_log(db, inv, debtor, response_message)
         action = "promise_logged"
 
     elif intent in {"dispute", "hostile"}:
@@ -214,7 +235,7 @@ async def handle_inbound_reply(db, invoice_id: str, text: str) -> dict:
             "Understood. I'm flagging this to our accounts team who will reach out "
             "directly to resolve. Thank you for the note."
         )
-        await _log_chase(db, inv, 0, response_message)
+        await _send_and_log(db, inv, debtor, response_message)
         action = "escalated"
 
     elif intent == "claims_paid":
@@ -225,20 +246,18 @@ async def handle_inbound_reply(db, invoice_id: str, text: str) -> dict:
             "Thanks — we'll verify the payment on our end and confirm shortly. "
             "If you have a UTR / transaction reference, please share it."
         )
-        await _log_chase(db, inv, 0, response_message)
+        await _send_and_log(db, inv, debtor, response_message)
         action = "verify_pending"
 
     elif intent == "request_info":
-        debtor = await _get_debtor(db, inv["debtor_id"])
         response_message = (
             f"Sure — invoice {inv['invoice_number']} for {format_inr(inv['amount_inr'])}, "
             f"issued {inv['issue_date']}, due {inv['due_date']}. Payment link: {upi_deep_link(inv)}"
         )
-        await _log_chase(db, inv, 0, response_message)
+        await _send_and_log(db, inv, debtor, response_message)
         action = "info_sent"
 
     else:  # unclear
-        # Count recent unclears — 2 in a row → escalate
         recent = await db.inbound_messages.find(
             {"invoice_id": invoice_id}, {"_id": 0}
         ).sort("received_at", -1).to_list(2)
@@ -253,7 +272,7 @@ async def handle_inbound_reply(db, invoice_id: str, text: str) -> dict:
             action = "escalated_needs_human"
         else:
             response_message = "Sorry, could you clarify — are you asking for details, disputing, or planning to pay?"
-        await _log_chase(db, inv, 0, response_message)
+        await _send_and_log(db, inv, debtor, response_message)
 
     return {
         "inbound_id": inbound_id,

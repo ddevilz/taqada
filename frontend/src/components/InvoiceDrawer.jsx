@@ -29,12 +29,20 @@ export default function InvoiceDrawer({ invoiceId, open, onClose, onRefresh }) {
   const [previewRung, setPreviewRung] = useState(null);
   const [previewMessage, setPreviewMessage] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [tgLink, setTgLink] = useState(null);
 
   const load = async (id) => {
     setLoading(true);
     try {
       const inv = await api.invoice(id);
       setInvoice(inv);
+      if (inv.debtor?.id) {
+        try {
+          setTgLink(await api.telegramLink(inv.debtor.id));
+        } catch {
+          setTgLink(null);
+        }
+      }
     } catch (e) {
       toast.error("Failed to load invoice");
     } finally {
@@ -49,6 +57,7 @@ export default function InvoiceDrawer({ invoiceId, open, onClose, onRefresh }) {
       setInvoice(null);
       setPreviewMessage(null);
       setPreviewRung(null);
+      setTgLink(null);
     }
   }, [invoiceId, open]);
 
@@ -320,6 +329,56 @@ export default function InvoiceDrawer({ invoiceId, open, onClose, onRefresh }) {
                 />
                 {invoice.reconciled_via && (
                   <Row label="Reconciled via" value={invoice.reconciled_via} />
+                )}
+                {tgLink && (
+                  <div className="mt-4 pt-4 border-t border-ink/10">
+                    <div className="font-mono-data text-[10px] uppercase tracking-widest text-ink/50 mb-2">
+                      Telegram channel
+                    </div>
+                    {tgLink.telegram_chat_id ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono-data text-sm text-forest">
+                          ✓ Linked · chat_id {tgLink.telegram_chat_id}
+                        </span>
+                      </div>
+                    ) : tgLink.deep_link ? (
+                      <div className="space-y-2">
+                        <div className="font-mono-data text-[11px] text-ink/70">
+                          Debtor not linked yet. Share this deep-link — they tap it and get connected automatically.
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            readOnly
+                            value={tgLink.deep_link}
+                            data-testid="tg-deep-link-input"
+                            className="flex-1 font-mono-data text-xs bg-parchment border border-ink/15 px-2 py-1.5"
+                          />
+                          <button
+                            data-testid="tg-copy-link"
+                            onClick={() => {
+                              navigator.clipboard.writeText(tgLink.deep_link);
+                              toast.success("Deep-link copied");
+                            }}
+                            className="font-mono-data text-[10px] uppercase tracking-wider bg-ink text-parchment px-3 py-1.5 hover:bg-ink-2"
+                          >
+                            Copy
+                          </button>
+                          <a
+                            href={tgLink.deep_link}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono-data text-[10px] uppercase tracking-wider border border-ink/20 text-ink px-3 py-1.5 hover:bg-parchment-2"
+                          >
+                            Open
+                          </a>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="font-mono-data text-[11px] text-ink/50">
+                        Telegram bot not configured
+                      </div>
+                    )}
+                  </div>
                 )}
               </TabsContent>
             </Tabs>

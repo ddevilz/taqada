@@ -66,3 +66,29 @@ Frontend: React 19 (CRA), Fraunces/Space Grotesk/IBM Plex Mono, sharp-corner led
 - Real link created: `https://rzp.io/rzp/rjFR8Mwx` for INV-2601-S (₹4,500).
 - Webhook with bad signature → HTTP 400.
 - Webhook with valid HMAC-SHA256(secret=test12345) for `payment_link.paid` → invoice marked paid, `reconciled_via=razorpay_webhook`, `recovered_this_week` counter bumped.
+
+## 2026-07-10 · Telegram Bot channel (fallback for Twilio)
+- Added `telegram_client.py` — thin httpx wrapper for `sendMessage`, `setWebhook`, `getMe`, `getWebhookInfo`. Bot username cached on first call. Webhook auth via `X-Telegram-Bot-Api-Secret-Token` header (set via `setWebhook.secret_token`).
+- Added `messaging.py` — channel router. Auto-selects: WhatsApp (Twilio) → Telegram → Demo based on env vars (`TWILIO_*` beats `TELEGRAM_BOT_TOKEN`). `send_chase(debtor, text)` returns `{channel, delivered, target, error?}`. Never raises; caller logs chase_event regardless.
+- Backend env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, `TWILIO_*` placeholders.
+- Debtor doc gains: `telegram_chat_id`, `last_outbound_invoice_id` (to route inbound replies).
+- chase_events gains: `channel`, `delivered`, `delivery_target`, `delivery_error`.
+- On startup: if `TELEGRAM_BOT_TOKEN` set, call `getMe` (cache username) + `setWebhook(PUBLIC_BASE_URL + /api/webhooks/telegram, secret_token=…)`.
+- New endpoints:
+  - `POST /api/webhooks/telegram` — verifies secret header, handles `/start <debtor_id>` (auto-links chat_id), regular text (routes via `last_outbound_invoice_id` or the most-overdue invoice for that debtor into the existing `handle_inbound_reply` intent classifier).
+  - `GET /api/debtors/{id}/telegram-link` — returns the deep-link URL and current link status.
+  - `POST /api/debtors/link-telegram` — manual chat_id linking.
+- Frontend:
+  - Header now shows `Channel · telegram (@taqada_bot)` (or `whatsapp` / `demo`).
+  - Activity feed rows show a per-message delivery pill (`✓ telegram` if delivered, `! telegram` if not, `demo` if channel is off).
+  - InvoiceDrawer Details tab has a "Telegram channel" section with the deep-link URL + Copy / Open buttons; shows `✓ Linked · chat_id N` once the debtor has /start'd the bot.
+
+### Verified end-to-end
+- Bot registered as `@taqada_bot`, webhook set successfully on startup.
+- `/api/webhooks/telegram` rejects requests without valid secret → 403.
+- `/start <debtor_id>` via deep-link → debtor.telegram_chat_id updated, welcome message sent (real Telegram API call).
+- Chase to a linked debtor made a real Telegram API call (fake chat_id → "chat not found" surfaces as `delivery_error`).
+- Chase to an unlinked debtor still logs the chase_event but marks `delivered=False` with a clear error message.
+
+## 2026-07-10 · Test credentials update
+`test_credentials.md` unchanged — app still has no auth. Telegram: the seed debtors are not pre-linked; a real user must `/start` the `@taqada_bot` bot with a debtor-specific deep-link to receive messages.

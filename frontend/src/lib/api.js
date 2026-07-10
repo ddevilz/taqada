@@ -24,4 +24,6 @@ export const api = {
     client.post("/demo/mark-paid", { invoice_id }).then((r) => r.data),
   previewMessage: (invoice_id, rung) =>
     client.post("/messages/preview", { invoice_id, rung }).then((r) => r.data),
+  telegramLink: (debtor_id) =>
+    client.get(`/debtors/${debtor_id}/telegram-link`).then((r) => r.data),
 };

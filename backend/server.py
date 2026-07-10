@@ -21,8 +21,10 @@ from aging import enrich_invoice, format_inr  # noqa: E402
 from agent import handle_inbound_reply, run_agent_tick, ensure_payment_link  # noqa: E402
 from config import DEMO_MODE  # noqa: E402
 from llm import llm_status  # noqa: E402
+import messaging  # noqa: E402
 import razorpay_client  # noqa: E402
 from seed_data import seed_database  # noqa: E402
+import telegram_client  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +52,7 @@ async def root():
         "demo_mode": DEMO_MODE,
         "llm": llm_status(),
         "razorpay": razorpay_client.status(),
+        "messaging": messaging.status(),
     }
 
 
@@ -63,6 +66,7 @@ async def get_config():
         "max_extension_days": MAX_EXTENSION_DAYS,
         "llm": llm_status(),
         "razorpay": razorpay_client.status(),
+        "messaging": messaging.status(),
     }
 
 
@@ -224,6 +228,9 @@ async def dashboard_activity(limit: int = 40):
             "debtor_name": dbtr["name"] if dbtr else None,
             "debtor_company": dbtr["company"] if dbtr else None,
             "amount_formatted": format_inr(inv["amount_inr"]) if inv else None,
+            "channel": c.get("channel", "demo"),
+            "delivered": c.get("delivered", False),
+            "delivery_error": c.get("delivery_error"),
         })
     for m in inbound:
         inv = imap.get(m["invoice_id"], {})
@@ -482,6 +489,120 @@ async def razorpay_webhook(request: Request):
 
 
 # ============================================================
+# Telegram bot: deep-link + webhook (inbound)
+# ============================================================
+
+
+@api.get("/debtors/{debtor_id}/telegram-link")
+async def debtor_telegram_link(debtor_id: str):
+    """Return the deep-link URL a debtor should tap to /start the bot and get
+    auto-linked. Also returns whether the debtor is already linked."""
+    dbtr = await db.debtors.find_one({"id": debtor_id}, {"_id": 0})
+    if not dbtr:
+        raise HTTPException(404, "debtor not found")
+    username = await telegram_client.bot_username()
+    link = f"https://t.me/{username}?start={debtor_id}" if username else None
+    return {
+        "debtor_id": debtor_id,
+        "deep_link": link,
+        "bot_username": username,
+        "telegram_chat_id": dbtr.get("telegram_chat_id"),
+    }
+
+
+class LinkChatRequest(BaseModel):
+    debtor_id: str
+    telegram_chat_id: int
+
+
+@api.post("/debtors/link-telegram")
+async def link_debtor_chat(req: LinkChatRequest):
+    r = await db.debtors.update_one(
+        {"id": req.debtor_id},
+        {"$set": {"telegram_chat_id": req.telegram_chat_id}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "debtor not found")
+    return {"linked": True, "debtor_id": req.debtor_id, "telegram_chat_id": req.telegram_chat_id}
+
+
+@api.post("/webhooks/telegram")
+async def telegram_webhook(request: Request):
+    # Verify Telegram-issued secret header (set via setWebhook.secret_token)
+    provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not telegram_client.webhook_secret() or provided != telegram_client.webhook_secret():
+        raise HTTPException(status_code=403, detail="invalid webhook secret")
+
+    payload = await request.json()
+    log.info("telegram update: %s", str(payload)[:400])
+
+    message = payload.get("message") or payload.get("edited_message")
+    if not message:
+        return {"ok": True, "ignored": True}
+
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+    if not chat_id or not text:
+        return {"ok": True, "ignored": True}
+
+    # /start [<debtor_id>] — auto-link
+    if text.startswith("/start"):
+        parts = text.split(maxsplit=1)
+        payload_arg = parts[1].strip() if len(parts) > 1 else ""
+        debtor = None
+        if payload_arg:
+            debtor = await db.debtors.find_one({"id": payload_arg}, {"_id": 0})
+        if debtor is None:
+            # Try to match by phone if the user shared contact — best-effort skip.
+            await telegram_client.send_message(
+                chat_id,
+                "Hi! I'm Taqada, an invoice collections assistant. Ask your supplier "
+                "to share your personal /start link so I can connect your account.",
+            )
+            return {"ok": True, "action": "start_no_debtor"}
+
+        await db.debtors.update_one(
+            {"id": debtor["id"]},
+            {"$set": {"telegram_chat_id": chat_id}},
+        )
+        await telegram_client.send_message(
+            chat_id,
+            f"Hi {debtor['name'].split()[0]} — you're now linked to Taqada. "
+            f"Any messages about your invoices from {debtor.get('company', 'us')} will come through here.",
+        )
+        return {"ok": True, "action": "linked", "debtor_id": debtor["id"]}
+
+    # Regular message — find the debtor by chat_id and route to the last active invoice
+    debtor = await db.debtors.find_one({"telegram_chat_id": chat_id}, {"_id": 0})
+    if not debtor:
+        await telegram_client.send_message(
+            chat_id,
+            "I don't have you linked yet. Ask your supplier for your /start link.",
+        )
+        return {"ok": True, "action": "unlinked_chat"}
+
+    invoice_id = debtor.get("last_outbound_invoice_id")
+    if not invoice_id:
+        # Fallback: pick the most-overdue unpaid invoice for this debtor
+        inv = await db.invoices.find_one(
+            {"debtor_id": debtor["id"], "status": {"$in": ["unpaid", "promised"]}},
+            {"_id": 0},
+            sort=[("due_date", 1)],
+        )
+        invoice_id = inv["id"] if inv else None
+
+    if not invoice_id:
+        await telegram_client.send_message(
+            chat_id, "Thanks — all your invoices with us are settled. Nothing pending."
+        )
+        return {"ok": True, "action": "no_open_invoice"}
+
+    result = await handle_inbound_reply(db, invoice_id, text)
+    return {"ok": True, **result}
+
+
+# ============================================================
 # App wiring
 # ============================================================
 
@@ -498,12 +619,28 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
-    log.info("Taqada starting. DEMO_MODE=%s, LLM=%s", DEMO_MODE, llm_status())
-    # Auto-seed if empty (so a fresh pod boots into a demoable state)
+    log.info(
+        "Taqada starting. DEMO_MODE=%s, LLM=%s, channel=%s",
+        DEMO_MODE, llm_status(), messaging.active_channel(),
+    )
+    # Auto-seed if empty
     count = await db.invoices.count_documents({})
     if count == 0:
         log.info("empty invoices collection → seeding demo data")
         await seed_database(db)
+
+    # If Telegram is enabled, register its webhook + prime bot username cache.
+    if telegram_client.enabled():
+        try:
+            uname = await telegram_client.bot_username()
+            log.info("Telegram bot username: %s", uname)
+            public_base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+            if public_base:
+                webhook_url = f"{public_base}/api/webhooks/telegram"
+                resp = await telegram_client.set_webhook(webhook_url)
+                log.info("Telegram setWebhook → %s: %s", webhook_url, resp)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Telegram bootstrap failed: %s", e)
 
 
 @app.on_event("shutdown")
