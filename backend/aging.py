@@ -85,9 +85,8 @@ def compute_accrued_interest(invoice: dict) -> Decimal:
     monthly_rate = annual_rate / Decimal("12")
     months = Decimal(dpl) / Decimal("30")
 
-    # Compound: P * ((1 + r)^n - 1). Use float for exponent, then quantise.
-    growth = (Decimal("1") + monthly_rate) ** months  # type: ignore[operator]
-    # ** on Decimal with Decimal exponent works when exponent has no fraction; use float fallback
+    # Compound: P * ((1 + r)^n - 1). Decimal**Decimal can fail on fractional
+    # exponents on some Python versions — fall back to float in that case.
     try:
         growth = (Decimal("1") + monthly_rate) ** months
     except Exception:

@@ -159,7 +159,7 @@ def _stub_classify(text: str) -> dict:
 
     if any(w in t for w in ["already paid", "paid it", "have paid", "sent the money", "transferred"]):
         return {"intent": "claims_paid", "confidence": 0.85, "promised_date": None, "notes": "stub match"}
-    if any(w in t for w in ["dispute", "wrong amount", "did not order", "not correct", "incorrect"]):
+    if any(w in t for w in ["dispute", "wrong amount", "did not order", "didn't order", "invoice is wrong", "not correct", "incorrect", "wrong invoice"]):
         return {"intent": "dispute", "confidence": 0.8, "promised_date": None, "notes": "stub match"}
     if any(w in t for w in ["stop messaging", "leave me alone", "harass", "fuck", "shut up"]):
         return {"intent": "hostile", "confidence": 0.9, "promised_date": None, "notes": "stub match"}
@@ -167,31 +167,49 @@ def _stub_classify(text: str) -> dict:
         return {"intent": "request_info", "confidence": 0.7, "promised_date": None, "notes": "stub match"}
 
     # promise_to_pay heuristics
-    promise_words = ["will pay", "can pay", "by", "next week", "next month", "tomorrow", "friday", "monday", "tuesday", "wednesday", "thursday", "saturday", "sunday", "on the"]
+    promise_words = [
+        "will pay", "'ll pay", "ill pay", "can pay", "pay in", "pay by",
+        "next week", "next month", "tomorrow", "friday", "monday", "tuesday",
+        "wednesday", "thursday", "saturday", "sunday", "on the",
+        "end of month", "end of the month", "eom", "next friday",
+    ]
     if any(w in t for w in promise_words):
-        # Try to extract a date
-        today = __import__("datetime").datetime.utcnow().date()
+        from datetime import datetime as _dt, timezone as _tz
+        today = _dt.now(_tz.utc).date()
         promised = today + timedelta(days=7)
-        if "next month" in t:
+
+        # "in N days/weeks/months"
+        m_span = re.search(r"in\s+(\d+)\s+(day|days|week|weeks|month|months)", t)
+        if m_span:
+            n = int(m_span.group(1))
+            unit = m_span.group(2)
+            if unit.startswith("day"):
+                promised = today + timedelta(days=n)
+            elif unit.startswith("week"):
+                promised = today + timedelta(days=n * 7)
+            else:  # months
+                promised = today + timedelta(days=n * 30)
+        elif "next month" in t or "end of the month" in t or "end of month" in t or "eom" in t:
             promised = today + timedelta(days=30)
         elif "tomorrow" in t:
             promised = today + timedelta(days=1)
-        elif "next week" in t:
+        elif "next week" in t or "next friday" in t:
             promised = today + timedelta(days=7)
-        # e.g. "by the 12th"
-        m = re.search(r"(\d{1,2})(?:st|nd|rd|th)?", t)
-        if m:
-            try:
-                day = int(m.group(1))
-                year, month = today.year, today.month
-                if day < today.day:
-                    # next month
-                    month += 1
-                    if month > 12:
-                        month, year = 1, year + 1
-                promised = today.replace(year=year, month=month, day=min(day, 28))
-            except Exception:
-                pass
+        else:
+            # e.g. "by the 12th"
+            m_day = re.search(r"(\d{1,2})(?:st|nd|rd|th)", t)
+            if m_day:
+                try:
+                    day = int(m_day.group(1))
+                    year, month = today.year, today.month
+                    if day <= today.day:
+                        month += 1
+                        if month > 12:
+                            month, year = 1, year + 1
+                    promised = today.replace(year=year, month=month, day=min(day, 28))
+                except Exception:
+                    pass
+
         return {
             "intent": "promise_to_pay",
             "confidence": 0.75,

@@ -44,3 +44,8 @@ Frontend: React 19 (CRA), Fraunces/Space Grotesk/IBM Plex Mono, sharp-corner led
 ## Constraints
 - Solo dev, hackathon deadline 2026-07-11 15:00 UTC
 - Not scored on speed/accuracy benchmarks — no evals
+
+## 2026-07-10 · Testing iteration 1 fixes
+- Fixed `llm._stub_classify`: added `didn't order`, `invoice is wrong` for disputes; added `'ll pay`, `pay in`, and a regex `in N (days|weeks|months)` for promise extraction. Both fixes verified via curl.
+- Cleaned up duplicate `growth = ...` computation in `aging.compute_accrued_interest`.
+- Backend pytest 15/17 → all core flows now working; test agent found no UI bugs.
