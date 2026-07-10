@@ -1,89 +1,404 @@
-from fastapi import FastAPI, APIRouter
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
-from datetime import datetime, timezone
+"""Taqada backend — FastAPI server, MongoDB, in-process agent loop."""
+from __future__ import annotations
 
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from dotenv import load_dotenv
+from fastapi import APIRouter, FastAPI, HTTPException
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field
+from starlette.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+load_dotenv(ROOT_DIR / ".env")
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+# Local imports (after load_dotenv so config sees env)
+from aging import enrich_invoice, format_inr  # noqa: E402
+from agent import handle_inbound_reply, run_agent_tick  # noqa: E402
+from config import DEMO_MODE  # noqa: E402
+from llm import llm_status  # noqa: E402
+from seed_data import seed_database  # noqa: E402
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+log = logging.getLogger("taqada")
+
+mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ["DB_NAME"]]
 
-# Create the main app without a prefix
-app = FastAPI()
-
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+app = FastAPI(title="Taqada API")
+api = APIRouter(prefix="/api")
 
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# ============================================================
+# Health / config
+# ============================================================
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
+@api.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {
+        "service": "taqada",
+        "demo_mode": DEMO_MODE,
+        "llm": llm_status(),
+    }
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+@api.get("/config")
+async def get_config():
+    from config import MAX_EXTENSION_DAYS, RBI_BANK_RATE
 
-# Include the router in the main app
-app.include_router(api_router)
+    return {
+        "demo_mode": DEMO_MODE,
+        "rbi_bank_rate_percent": float(RBI_BANK_RATE),
+        "max_extension_days": MAX_EXTENSION_DAYS,
+        "llm": llm_status(),
+    }
+
+
+# ============================================================
+# Seed
+# ============================================================
+
+
+@api.post("/seed")
+async def do_seed():
+    result = await seed_database(db)
+    return {"seeded": True, **result}
+
+
+# ============================================================
+# Debtors
+# ============================================================
+
+
+@api.get("/debtors")
+async def list_debtors():
+    debtors = await db.debtors.find({}, {"_id": 0}).to_list(500)
+    return debtors
+
+
+# ============================================================
+# Invoices
+# ============================================================
+
+
+@api.get("/invoices")
+async def list_invoices(status: Optional[str] = None):
+    q = {}
+    if status:
+        q["status"] = status
+    invoices = await db.invoices.find(q, {"_id": 0}).to_list(1000)
+    # Attach debtor info + computed fields
+    debtor_ids = {i["debtor_id"] for i in invoices}
+    debtors = await db.debtors.find({"id": {"$in": list(debtor_ids)}}, {"_id": 0}).to_list(500)
+    dmap = {d["id"]: d for d in debtors}
+    enriched = []
+    for inv in invoices:
+        e = enrich_invoice(inv)
+        e["debtor"] = dmap.get(inv["debtor_id"])
+        enriched.append(e)
+    # sort by days_overdue desc
+    enriched.sort(key=lambda x: x["days_overdue"], reverse=True)
+    return enriched
+
+
+@api.get("/invoices/{invoice_id}")
+async def get_invoice(invoice_id: str):
+    inv = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "invoice not found")
+    debtor = await db.debtors.find_one({"id": inv["debtor_id"]}, {"_id": 0})
+    e = enrich_invoice(inv)
+    e["debtor"] = debtor
+    # Attach conversation
+    chase_events = await db.chase_events.find(
+        {"invoice_id": invoice_id}, {"_id": 0}
+    ).sort("sent_at", 1).to_list(200)
+    inbound = await db.inbound_messages.find(
+        {"invoice_id": invoice_id}, {"_id": 0}
+    ).sort("received_at", 1).to_list(200)
+    promises = await db.promises.find(
+        {"invoice_id": invoice_id}, {"_id": 0}
+    ).sort("created_at", 1).to_list(50)
+    e["chase_events"] = chase_events
+    e["inbound_messages"] = inbound
+    e["promises"] = promises
+    return e
+
+
+# ============================================================
+# Dashboard aggregates
+# ============================================================
+
+
+@api.get("/dashboard/summary")
+async def dashboard_summary():
+    invoices = await db.invoices.find({}, {"_id": 0}).to_list(2000)
+    buckets = {"current": 0.0, "1-15": 0.0, "16-45": 0.0, "46-90": 0.0, "90+": 0.0}
+    bucket_counts = {"current": 0, "1-15": 0, "16-45": 0, "46-90": 0, "90+": 0}
+    total_outstanding = 0.0
+    total_paid_this_week = 0.0
+    total_paid_all_time = 0.0
+    now = datetime.now(timezone.utc).date()
+
+    weighted_days = 0.0
+    for inv in invoices:
+        e = enrich_invoice(inv)
+        amt = float(inv["amount_inr"])
+        status = inv.get("status")
+        if status == "paid":
+            total_paid_all_time += amt
+            paid_date = inv.get("paid_date")
+            if paid_date:
+                try:
+                    pd = datetime.fromisoformat(paid_date).date()
+                    if (now - pd).days <= 7:
+                        total_paid_this_week += amt
+                except Exception:
+                    pass
+        else:
+            total_outstanding += amt
+            b = e["aging_bucket"]
+            buckets[b] += amt
+            bucket_counts[b] += 1
+            weighted_days += amt * max(0, e["days_overdue"])
+
+    dso = (weighted_days / total_outstanding) if total_outstanding > 0 else 0.0
+
+    escalated = await db.invoices.count_documents({"status": "escalated_human"})
+    promised = await db.invoices.count_documents({"status": "promised"})
+
+    return {
+        "buckets": [
+            {"key": k, "amount": buckets[k], "count": bucket_counts[k], "formatted": format_inr(buckets[k])}
+            for k in ["current", "1-15", "16-45", "46-90", "90+"]
+        ],
+        "total_outstanding": total_outstanding,
+        "total_outstanding_formatted": format_inr(total_outstanding),
+        "recovered_this_week": total_paid_this_week,
+        "recovered_this_week_formatted": format_inr(total_paid_this_week),
+        "recovered_all_time": total_paid_all_time,
+        "recovered_all_time_formatted": format_inr(total_paid_all_time),
+        "dso_days": round(dso, 1),
+        "escalated_count": escalated,
+        "promised_count": promised,
+    }
+
+
+@api.get("/dashboard/activity")
+async def dashboard_activity(limit: int = 40):
+    chases = await db.chase_events.find({}, {"_id": 0}).sort("sent_at", -1).to_list(limit)
+    inbound = await db.inbound_messages.find({}, {"_id": 0}).sort("received_at", -1).to_list(limit)
+
+    # Enrich with invoice + debtor
+    inv_ids = list({*[c["invoice_id"] for c in chases], *[i["invoice_id"] for i in inbound]})
+    invoices = await db.invoices.find({"id": {"$in": inv_ids}}, {"_id": 0}).to_list(1000)
+    imap = {i["id"]: i for i in invoices}
+    debtor_ids = list({i["debtor_id"] for i in invoices})
+    debtors = await db.debtors.find({"id": {"$in": debtor_ids}}, {"_id": 0}).to_list(500)
+    dmap = {d["id"]: d for d in debtors}
+
+    combined = []
+    for c in chases:
+        inv = imap.get(c["invoice_id"], {})
+        dbtr = dmap.get(inv.get("debtor_id"))
+        combined.append({
+            "type": "outbound",
+            "id": c["id"],
+            "at": c["sent_at"],
+            "rung": c["rung"],
+            "text": c["message_text"],
+            "invoice_number": inv.get("invoice_number"),
+            "invoice_id": c["invoice_id"],
+            "debtor_name": dbtr["name"] if dbtr else None,
+            "debtor_company": dbtr["company"] if dbtr else None,
+            "amount_formatted": format_inr(inv["amount_inr"]) if inv else None,
+        })
+    for m in inbound:
+        inv = imap.get(m["invoice_id"], {})
+        dbtr = dmap.get(inv.get("debtor_id"))
+        combined.append({
+            "type": "inbound",
+            "id": m["id"],
+            "at": m["received_at"],
+            "intent": m.get("classified_intent"),
+            "confidence": m.get("confidence"),
+            "text": m["raw_text"],
+            "invoice_number": inv.get("invoice_number"),
+            "invoice_id": m["invoice_id"],
+            "debtor_name": dbtr["name"] if dbtr else None,
+            "debtor_company": dbtr["company"] if dbtr else None,
+        })
+    combined.sort(key=lambda x: x["at"], reverse=True)
+    return combined[:limit]
+
+
+@api.get("/dashboard/escalations")
+async def dashboard_escalations():
+    invoices = await db.invoices.find(
+        {"status": "escalated_human"}, {"_id": 0}
+    ).to_list(200)
+    debtor_ids = list({i["debtor_id"] for i in invoices})
+    debtors = await db.debtors.find({"id": {"$in": debtor_ids}}, {"_id": 0}).to_list(200)
+    dmap = {d["id"]: d for d in debtors}
+    out = []
+    for inv in invoices:
+        e = enrich_invoice(inv)
+        e["debtor"] = dmap.get(inv["debtor_id"])
+        # Get last inbound message for context
+        last = await db.inbound_messages.find(
+            {"invoice_id": inv["id"]}, {"_id": 0}
+        ).sort("received_at", -1).to_list(1)
+        e["last_inbound"] = last[0] if last else None
+        out.append(e)
+    out.sort(key=lambda x: x["days_overdue"], reverse=True)
+    return out
+
+
+# ============================================================
+# Agent controls
+# ============================================================
+
+
+@api.post("/agent/run")
+async def agent_run():
+    result = await run_agent_tick(db)
+    return result
+
+
+class ChaseRequest(BaseModel):
+    invoice_id: str
+
+
+@api.post("/agent/chase")
+async def agent_chase_one(req: ChaseRequest):
+    inv = await db.invoices.find_one({"id": req.invoice_id}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "invoice not found")
+    from agent import chase_invoice as _chase
+    result = await _chase(db, inv)
+    return result
+
+
+class SimulateReplyRequest(BaseModel):
+    invoice_id: str
+    text: str = Field(..., min_length=1, max_length=1000)
+
+
+@api.post("/agent/simulate-reply")
+async def agent_simulate_reply(req: SimulateReplyRequest):
+    result = await handle_inbound_reply(db, req.invoice_id, req.text)
+    return result
+
+
+class MarkPaidRequest(BaseModel):
+    invoice_id: str
+
+
+@api.post("/demo/mark-paid")
+async def demo_mark_paid(req: MarkPaidRequest):
+    inv = await db.invoices.find_one({"id": req.invoice_id}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "invoice not found")
+    now = datetime.now(timezone.utc)
+    await db.invoices.update_one(
+        {"id": req.invoice_id},
+        {"$set": {"status": "paid", "paid_date": now.date().isoformat()}},
+    )
+    # mark promise as kept if pending
+    await db.promises.update_many(
+        {"invoice_id": req.invoice_id, "status": "pending"},
+        {"$set": {"status": "kept"}},
+    )
+    return {"marked_paid": True, "invoice_id": req.invoice_id, "amount": inv["amount_inr"]}
+
+
+# ============================================================
+# Preview a message without sending (for the message-preview modal)
+# ============================================================
+
+
+class PreviewRequest(BaseModel):
+    invoice_id: str
+    rung: Optional[int] = None  # if None, uses select_rung
+
+
+@api.post("/messages/preview")
+async def preview_message(req: PreviewRequest):
+    from aging import (
+        compute_accrued_interest,
+        days_overdue,
+        days_past_statutory,
+        is_statutory_eligible,
+        select_rung,
+        statutory_limit_days,
+        upi_deep_link,
+    )
+    from llm import generate_chase_message
+
+    inv = await db.invoices.find_one({"id": req.invoice_id}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "invoice not found")
+    debtor = await db.debtors.find_one({"id": inv["debtor_id"]}, {"_id": 0})
+    rung = req.rung if req.rung is not None else max(1, select_rung(inv))
+    if rung == 0:
+        rung = 1
+    eligible, reason = is_statutory_eligible(inv)
+    interest = compute_accrued_interest(inv) if eligible else 0
+    ctx = {
+        "debtor_name": debtor["name"],
+        "invoice_number": inv["invoice_number"],
+        "formatted_amount": format_inr(inv["amount_inr"]),
+        "days_overdue": days_overdue(inv),
+        "upi_link": upi_deep_link(inv),
+        "statutory_eligible": eligible,
+        "statutory_limit_days": statutory_limit_days(inv),
+        "days_past_statutory": days_past_statutory(inv),
+        "formatted_interest": format_inr(interest),
+    }
+    message = generate_chase_message(rung, ctx)
+    return {
+        "rung": rung,
+        "message": message,
+        "statutory_eligible": eligible,
+        "eligibility_reason": reason,
+        "accrued_interest_formatted": format_inr(interest),
+    }
+
+
+# ============================================================
+# App wiring
+# ============================================================
+
+app.include_router(api)
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+async def startup():
+    log.info("Taqada starting. DEMO_MODE=%s, LLM=%s", DEMO_MODE, llm_status())
+    # Auto-seed if empty (so a fresh pod boots into a demoable state)
+    count = await db.invoices.count_documents({})
+    if count == 0:
+        log.info("empty invoices collection → seeding demo data")
+        await seed_database(db)
+
 
 @app.on_event("shutdown")
-async def shutdown_db_client():
+async def shutdown():
     client.close()

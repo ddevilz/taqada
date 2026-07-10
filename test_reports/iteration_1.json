@@ -1,0 +1,39 @@
+{
+  "summary": "First testing run for Taqada MVP. Backend: 15/17 pytest passed (88%). Two stub-classifier bugs found for exact prompts specified in review. Frontend: dashboard, widgets, control strip, invoice ledger, filters, drawer tabs, and Rung 3 statutory citation gate all work correctly end-to-end via preview URL.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/agent/simulate-reply", "issue": "Stub classifier in llm.py::_stub_classify does NOT classify 'This invoice is wrong, we didn\\'t order this' as dispute. Returns 'unclear'. Keyword list checks for 'did not order' (no contraction) and 'dispute'/'wrong amount'/'not correct'/'incorrect'; none match the required test phrase. Fix: add 'wrong' and 'didn\\'t order' / broaden keywords. Explicitly listed in review spec.", "priority": "HIGH"},
+      {"endpoint": "POST /api/agent/simulate-reply", "issue": "Stub classifier does NOT classify \"I'll pay in 6 months\" as promise_to_pay. Returns 'unclear' because the promise heuristic looks for 'will pay' (not the contraction 'I\\'ll pay') and no other keyword matches. As a result, the MAX_EXTENSION_DAYS=30 counter-offer path is never reached for this exact test phrase. Fix: add \"'ll pay\", 'pay in', 'in N months', or a regex-based fallback in _stub_classify.", "priority": "HIGH"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Simulate debtor reply — long promise / dispute", "issue": "Because of stub classifier bugs above, the exact prompts in the review (\"I'll pay in 6 months\", \"This invoice is wrong, we didn't order this\") route to 'unclear'. After 2 consecutive unclears the flow escalates the invoice — observed INV-2351 in Human Escalation Queue on dashboard for this reason. Fix upstream in _stub_classify.", "affected_selectors": ["reply-submit"]}
+    ],
+    "design_issues": [
+      {"screen": "All modals", "issues": ["Radix DialogContent missing DialogTitle / aria-describedby — accessibility warnings in console. Wrap with VisuallyHidden or add DialogTitle."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix llm.py::_stub_classify: broaden 'dispute' keywords (add 'wrong', \"didn't order\") and promise keywords (add \"'ll pay\", 'pay in', regex for 'in N months/weeks/days').",
+    "Add DialogTitle (or VisuallyHidden wrapper) to all Radix DialogContent instances to silence a11y warnings."
+  ],
+  "critical_code_review_comments": [
+    "aging.py compound-interest block computes `growth = (1+r)**months` twice inside try/except — first call runs unconditionally and would raise on Decimal**Decimal-with-fraction pre-Python-3.11; remove the duplicate line 89 for clarity.",
+    "agent.py run_agent_tick chases every overdue invoice on each tick without any per-invoice cooldown — repeated calls will spam identical messages. Consider throttling by last chase_event timestamp.",
+    "server.py mixes routing and business logic (~400 lines). If server grows, split routers by resource (invoices/, dashboard/, agent/).",
+    "Two consecutive 'unclear' replies auto-escalate — with the stub classifier bug this fires very easily. Consider requiring >=2 messages AND some time gap.",
+    "llm.py stub uses datetime.utcnow() (deprecated in 3.12) — replace with datetime.now(timezone.utc)."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "88% (15/17)", "frontend": "100% of tested flows"},
+  "test_credentials": "None — no auth in app.",
+  "seed_data_creation": "Used POST /api/seed (idempotent) — 28 invoices, 8 debtors.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest at /app/backend/tests/backend_test.py runs via `python -m pytest tests/backend_test.py -o addopts='' --junitxml=/app/test_reports/pytest/pytest_results.xml` (must clear -n xdist from pytest.ini for JUnit). The two failing tests target the exact stub-classifier bugs; keep them as regression checks. Frontend rung 3 gated message renders 'Gate: {reason}' as a separate label above preview-message-body, not inside it — do not assert gate text inside preview-message-body selector.",
+  "rca of the issue": "Root cause: llm._stub_classify uses a small hard-coded keyword list that does not cover common English contractions ('I\\'ll', 'didn\\'t'). Since FIREWORKS_API_KEY is empty, stub is the only path. Reproduction: POST /api/agent/simulate-reply {invoice_id, text: \"I'll pay in 6 months\"} → intent='unclear' (expected promise_to_pay with 30-day counter-offer). Mitigation: extend keyword lists and add a light regex for time expressions ('in 6 months', '6 weeks', 'end of the month')."
+}
