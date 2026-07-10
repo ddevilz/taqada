@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
@@ -18,9 +18,10 @@ load_dotenv(ROOT_DIR / ".env")
 
 # Local imports (after load_dotenv so config sees env)
 from aging import enrich_invoice, format_inr  # noqa: E402
-from agent import handle_inbound_reply, run_agent_tick  # noqa: E402
+from agent import handle_inbound_reply, run_agent_tick, ensure_payment_link  # noqa: E402
 from config import DEMO_MODE  # noqa: E402
 from llm import llm_status  # noqa: E402
+import razorpay_client  # noqa: E402
 from seed_data import seed_database  # noqa: E402
 
 logging.basicConfig(
@@ -48,6 +49,7 @@ async def root():
         "service": "taqada",
         "demo_mode": DEMO_MODE,
         "llm": llm_status(),
+        "razorpay": razorpay_client.status(),
     }
 
 
@@ -60,6 +62,7 @@ async def get_config():
         "rbi_bank_rate_percent": float(RBI_BANK_RATE),
         "max_extension_days": MAX_EXTENSION_DAYS,
         "llm": llm_status(),
+        "razorpay": razorpay_client.status(),
     }
 
 
@@ -353,12 +356,16 @@ async def preview_message(req: PreviewRequest):
         rung = 1
     eligible, reason = is_statutory_eligible(inv)
     interest = compute_accrued_interest(inv) if eligible else 0
+    # Reuse persisted link if present; do NOT create a new Razorpay link for a
+    # preview (avoids polluting Razorpay with unused links).
+    persisted = inv.get("payment_link") or {}
+    pay_url = persisted.get("short_url") or upi_deep_link(inv)
     ctx = {
         "debtor_name": debtor["name"],
         "invoice_number": inv["invoice_number"],
         "formatted_amount": format_inr(inv["amount_inr"]),
         "days_overdue": days_overdue(inv),
-        "upi_link": upi_deep_link(inv),
+        "upi_link": pay_url,
         "statutory_eligible": eligible,
         "statutory_limit_days": statutory_limit_days(inv),
         "days_past_statutory": days_past_statutory(inv),
@@ -371,7 +378,107 @@ async def preview_message(req: PreviewRequest):
         "statutory_eligible": eligible,
         "eligibility_reason": reason,
         "accrued_interest_formatted": format_inr(interest),
+        "payment_link": {
+            "provider": persisted.get("provider", "mock_upi"),
+            "short_url": pay_url,
+            "link_id": persisted.get("link_id"),
+        },
     }
+
+
+# ============================================================
+# Razorpay Payment Links + webhook
+# ============================================================
+
+
+class CreateLinkRequest(BaseModel):
+    invoice_id: str
+
+
+@api.post("/payment-links/create")
+async def create_link_for_invoice(req: CreateLinkRequest):
+    inv = await db.invoices.find_one({"id": req.invoice_id}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "invoice not found")
+    link = await ensure_payment_link(db, inv)
+    return link
+
+
+@api.post("/webhooks/razorpay")
+async def razorpay_webhook(request: Request):
+    raw = (await request.body()).decode("utf-8")
+    signature = request.headers.get("X-Razorpay-Signature", "")
+
+    if not razorpay_client.verify_webhook_signature(raw, signature):
+        log.warning("Razorpay webhook signature verification FAILED")
+        raise HTTPException(status_code=400, detail="invalid signature")
+
+    import json as _json
+    try:
+        payload = _json.loads(raw)
+    except Exception:
+        raise HTTPException(400, "invalid json")
+
+    event = payload.get("event", "")
+    log.info("Razorpay webhook received: %s", event)
+
+    if event in {"payment_link.paid", "payment_link.partially_paid"}:
+        # Payload shape: payload.payload.payment_link.entity
+        entity = (
+            payload.get("payload", {})
+            .get("payment_link", {})
+            .get("entity", {})
+        )
+        link_id = entity.get("id")
+        notes = entity.get("notes") or {}
+        invoice_id = notes.get("invoice_id")
+
+        # Prefer notes.invoice_id; fall back to link_id lookup.
+        inv = None
+        if invoice_id:
+            inv = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+        if not inv and link_id:
+            inv = await db.invoices.find_one({"payment_link.link_id": link_id}, {"_id": 0})
+
+        if not inv:
+            log.warning("Razorpay webhook: no matching invoice for link_id=%s", link_id)
+            return {"received": True, "matched": False}
+
+        now = datetime.now(timezone.utc)
+        await db.invoices.update_one(
+            {"id": inv["id"]},
+            {
+                "$set": {
+                    "status": "paid",
+                    "paid_date": now.date().isoformat(),
+                    "payment_link.status": "paid",
+                    "reconciled_via": "razorpay_webhook",
+                    "reconciled_at": now.isoformat(),
+                }
+            },
+        )
+        # Mark any pending promise as kept
+        await db.promises.update_many(
+            {"invoice_id": inv["id"], "status": "pending"},
+            {"$set": {"status": "kept"}},
+        )
+        return {"received": True, "matched": True, "invoice_id": inv["id"]}
+
+    if event in {"payment_link.expired", "payment_link.cancelled"}:
+        entity = (
+            payload.get("payload", {})
+            .get("payment_link", {})
+            .get("entity", {})
+        )
+        link_id = entity.get("id")
+        if link_id:
+            await db.invoices.update_one(
+                {"payment_link.link_id": link_id},
+                {"$set": {"payment_link.status": event.split(".", 1)[1]}},
+            )
+        return {"received": True, "action": "link_deactivated"}
+
+    return {"received": True, "ignored": event}
 
 
 # ============================================================

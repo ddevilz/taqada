@@ -166,6 +166,8 @@ def format_inr(amount) -> str:
 def enrich_invoice(invoice: dict) -> dict:
     """Attach computed fields for API responses (does not persist)."""
     eligible, reason = is_statutory_eligible(invoice)
+    persisted_link = invoice.get("payment_link") or {}
+    link_url = persisted_link.get("short_url") or upi_deep_link(invoice)
     return {
         **invoice,
         "days_overdue": days_overdue(invoice),
@@ -176,6 +178,12 @@ def enrich_invoice(invoice: dict) -> dict:
         "statutory_eligible": eligible,
         "eligibility_reason": reason,
         "accrued_interest_inr": float(compute_accrued_interest(invoice)) if eligible else 0.0,
-        "upi_link": upi_deep_link(invoice),
+        "upi_link": link_url,  # kept for backwards compat with FE
+        "payment_link": {
+            "provider": persisted_link.get("provider", "mock_upi"),
+            "short_url": link_url,
+            "link_id": persisted_link.get("link_id"),
+            "status": persisted_link.get("status", "pending"),
+        },
         "formatted_amount": format_inr(invoice["amount_inr"]),
     }

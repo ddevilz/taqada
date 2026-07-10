@@ -1,4 +1,4 @@
-"""Agent orchestration: rung selection → message generation → send → log.
+"""Agent orchestration: rung selection → payment link → message generation → send → log.
 Also handles inbound reply routing + negotiation."""
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from aging import (
 )
 from config import MAX_EXTENSION_DAYS
 from llm import classify_reply, generate_chase_message
+import razorpay_client
 
 log = logging.getLogger("taqada.agent")
 
@@ -29,6 +30,29 @@ def _now_iso() -> str:
 
 async def _get_debtor(db, debtor_id: str) -> dict | None:
     return await db.debtors.find_one({"id": debtor_id}, {"_id": 0})
+
+
+async def ensure_payment_link(db, invoice: dict) -> dict:
+    """Return the active payment link for an invoice, creating one via Razorpay
+    if none exists. Falls back to a mock upi:// link if Razorpay is disabled
+    or the call fails.
+
+    Persists the link on the invoice document so it's reused across chases.
+    Returns dict with keys: provider, link_id, short_url, status.
+    """
+    existing = invoice.get("payment_link")
+    if existing and existing.get("short_url") and existing.get("status") in {"created", "issued", "fallback"}:
+        return existing
+
+    debtor = await _get_debtor(db, invoice["debtor_id"]) or {}
+    link = razorpay_client.create_payment_link(invoice, debtor)
+    link["created_at"] = _now_iso()
+    await db.invoices.update_one(
+        {"id": invoice["id"]},
+        {"$set": {"payment_link": link}},
+    )
+    invoice["payment_link"] = link
+    return link
 
 
 async def _log_chase(db, invoice: dict, rung: int, message: str) -> dict:
@@ -46,7 +70,7 @@ async def _log_chase(db, invoice: dict, rung: int, message: str) -> dict:
 
 
 async def chase_invoice(db, invoice: dict) -> dict:
-    """Select rung, generate & log message. Returns the chase_event."""
+    """Select rung, ensure payment link, generate & log message. Returns the chase_event."""
     debtor = await _get_debtor(db, invoice["debtor_id"])
     if not debtor:
         raise ValueError(f"debtor {invoice['debtor_id']} not found")
@@ -56,10 +80,11 @@ async def chase_invoice(db, invoice: dict) -> dict:
         return {"skipped": True, "reason": "not_overdue"}
 
     eligible, reason = is_statutory_eligible(invoice)
-    # For rung 3, if not eligible, fall back to firm rung-2-style (no legal citation)
     effective_rung = rung
-    if rung == 3 and not eligible:
-        effective_rung = 3  # keep in the "final" bucket but LLM won't cite (context omits)
+
+    # Reuse or create a Razorpay Payment Link
+    link = await ensure_payment_link(db, invoice)
+    pay_url = link.get("short_url") or upi_deep_link(invoice)
 
     interest = compute_accrued_interest(invoice) if eligible else 0
     ctx = {
@@ -67,7 +92,7 @@ async def chase_invoice(db, invoice: dict) -> dict:
         "invoice_number": invoice["invoice_number"],
         "formatted_amount": format_inr(invoice["amount_inr"]),
         "days_overdue": days_overdue(invoice),
-        "upi_link": upi_deep_link(invoice),
+        "upi_link": pay_url,
         "statutory_eligible": eligible,
         "statutory_limit_days": statutory_limit_days(invoice),
         "days_past_statutory": days_past_statutory(invoice),
@@ -75,6 +100,7 @@ async def chase_invoice(db, invoice: dict) -> dict:
     }
     message = generate_chase_message(effective_rung, ctx)
     ev = await _log_chase(db, invoice, effective_rung, message)
+    ev["payment_link"] = link
     return {"skipped": False, "chase_event": ev, "rung": effective_rung}
 
 

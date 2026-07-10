@@ -69,6 +69,12 @@ export default function Dashboard() {
               <>
                 <span data-testid="cfg-rbi-rate">RBI bank rate · {config.rbi_bank_rate_percent}%</span>
                 <span data-testid="cfg-llm">LLM · {config.llm.backend}</span>
+                <span
+                  data-testid="cfg-razorpay"
+                  className={config.razorpay?.enabled ? "text-forest" : "text-ink/50"}
+                >
+                  Razorpay · {config.razorpay?.enabled ? "live (test mode)" : "off"}
+                </span>
                 <span className="text-forest">Demo mode</span>
               </>
             )}

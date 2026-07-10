@@ -247,7 +247,7 @@ export default function InvoiceDrawer({ invoiceId, open, onClose, onRefresh }) {
                 )}
                 {previewMessage && (
                   <div className="p-4 border border-ink/15 bg-parchment">
-                    <div className="flex items-center gap-2 mb-3">
+                    <div className="flex items-center gap-2 mb-3 flex-wrap">
                       <RungPill rung={previewMessage.rung} />
                       {previewMessage.statutory_eligible ? (
                         <span className="font-mono-data text-[10px] uppercase tracking-wider text-forest">
@@ -256,6 +256,20 @@ export default function InvoiceDrawer({ invoiceId, open, onClose, onRefresh }) {
                       ) : (
                         <span className="font-mono-data text-[10px] uppercase tracking-wider text-ink/50">
                           Gate: {previewMessage.eligibility_reason}
+                        </span>
+                      )}
+                      {previewMessage.payment_link && (
+                        <span
+                          className={`font-mono-data text-[10px] uppercase tracking-wider px-2 py-0.5 border ml-auto ${
+                            previewMessage.payment_link.provider === "razorpay"
+                              ? "text-forest border-forest/30 bg-forest/5"
+                              : "text-ink/60 border-ink/15 bg-ink/5"
+                          }`}
+                          data-testid="preview-payment-provider"
+                        >
+                          {previewMessage.payment_link.provider === "razorpay"
+                            ? "Razorpay live"
+                            : "Mock UPI"}
                         </span>
                       )}
                     </div>
@@ -285,7 +299,28 @@ export default function InvoiceDrawer({ invoiceId, open, onClose, onRefresh }) {
                 <Row label="Supplier Udyam" value={invoice.supplier_udyam_category} />
                 <Row label="Aging bucket" value={invoice.aging_bucket} />
                 <Row label="Selected rung" value={`R${invoice.selected_rung}`} />
-                <Row label="UPI link" value={invoice.upi_link} mono />
+                <Row
+                  label={`Payment link (${invoice.payment_link?.provider || "mock_upi"})`}
+                  value={
+                    invoice.payment_link?.short_url ? (
+                      <a
+                        href={invoice.payment_link.short_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline text-forest hover:text-terracotta break-all"
+                        data-testid="drawer-payment-link"
+                      >
+                        {invoice.payment_link.short_url}
+                      </a>
+                    ) : (
+                      "—"
+                    )
+                  }
+                  mono
+                />
+                {invoice.reconciled_via && (
+                  <Row label="Reconciled via" value={invoice.reconciled_via} />
+                )}
               </TabsContent>
             </Tabs>
           </>

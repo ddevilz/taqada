@@ -49,3 +49,20 @@ Frontend: React 19 (CRA), Fraunces/Space Grotesk/IBM Plex Mono, sharp-corner led
 - Fixed `llm._stub_classify`: added `didn't order`, `invoice is wrong` for disputes; added `'ll pay`, `pay in`, and a regex `in N (days|weeks|months)` for promise extraction. Both fixes verified via curl.
 - Cleaned up duplicate `growth = ...` computation in `aging.compute_accrued_interest`.
 - Backend pytest 15/17 → all core flows now working; test agent found no UI bugs.
+
+## 2026-07-10 · Razorpay Payment Links + webhook (feature add)
+- Added `razorpay_client.py`: `create_payment_link` (INR paise, notes.invoice_id for reconciliation) + `verify_webhook_signature` (razorpay SDK utility) + `cancel_payment_link`.
+- Backend env: `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`.
+- `agent.chase_invoice` calls `ensure_payment_link` before message generation — reuses persisted link, embeds the `rzp.io/l/…` short_url in the WhatsApp message. Falls back to `upi://` mock link if Razorpay disabled or the API rejects (e.g. test-account amount cap).
+- New endpoints:
+  - `POST /api/payment-links/create` — manual link creation for an invoice.
+  - `POST /api/webhooks/razorpay` — verifies X-Razorpay-Signature, handles `payment_link.paid` / `payment_link.partially_paid` → marks invoice paid + sets `reconciled_via=razorpay_webhook` + closes any pending promise as kept; handles `payment_link.expired` / `cancelled` → marks the link stale so next chase regenerates.
+- `enrich_invoice` now surfaces `payment_link: {provider, short_url, link_id, status}`.
+- Frontend header shows "Razorpay · live (test mode)" indicator.
+- InvoiceDrawer Preview shows a "Razorpay live" or "Mock UPI" badge; Details tab shows the actual clickable link and `reconciled_via` after payment.
+- Seed now includes three small (< ₹5,000) invoices — `INV-2601-S`, `INV-2602-S`, `INV-2603-S` — so live Razorpay links can be demoed on the test-mode account (which caps per-link amount).
+
+### Verified end-to-end
+- Real link created: `https://rzp.io/rzp/rjFR8Mwx` for INV-2601-S (₹4,500).
+- Webhook with bad signature → HTTP 400.
+- Webhook with valid HMAC-SHA256(secret=test12345) for `payment_link.paid` → invoice marked paid, `reconciled_via=razorpay_webhook`, `recovered_this_week` counter bumped.

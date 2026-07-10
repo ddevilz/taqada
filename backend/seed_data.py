@@ -53,6 +53,12 @@ _INVOICES: list[tuple] = [
     (4, "INV-2352", 275000, 140, 15, "small", "unpaid"),    # 125 overdue
     (5, "INV-2353", 118000, 135, 45, "small", "unpaid"),    # 90 overdue
 
+    # Small-amount invoices (under ₹5,000) — for live Razorpay Payment Link demo
+    # (test-mode account has a per-link cap; production accounts don't)
+    (2, "INV-2601-S", 4500, 30, 15, "micro", "unpaid"),     # ₹4,500, 15d overdue → rung 2
+    (6, "INV-2602-S", 3200, 55, 15, "micro", "unpaid"),     # ₹3,200, 40d overdue → rung 3 eligible
+    (3, "INV-2603-S", 1800, 25, 15, "micro", "unpaid"),     # ₹1,800, 10d overdue → rung 2
+
     # Some already paid (contribute to Recovered counter)
     (0, "INV-2401", 175000, 40, 15, "small", "paid"),
     (2, "INV-2402", 88000, 35, 15, "micro", "paid"),
