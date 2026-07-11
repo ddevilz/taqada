@@ -7,10 +7,12 @@ Auto-selection order:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
 import telegram_client
+import twilio_client
 
 log = logging.getLogger("taqada.messaging")
 
@@ -33,7 +35,7 @@ def active_channel() -> str:
 def status() -> dict:
     return {
         "active": active_channel(),
-        "whatsapp": {"configured": _twilio_configured()},
+        "whatsapp": {"configured": _twilio_configured(), **twilio_client.status()},
         "telegram": telegram_client.status(),
     }
 
@@ -70,12 +72,19 @@ async def send_chase(debtor: dict, text: str) -> dict:
             return {"channel": "telegram", "delivered": False, "target": str(chat_id), "error": str(e)}
 
     if channel == "whatsapp":
-        # Twilio not yet implemented — placeholder for future.
-        return {
-            "channel": "whatsapp",
-            "delivered": False,
-            "target": debtor.get("phone_whatsapp"),
-            "error": "whatsapp send not implemented in this build",
-        }
+        to = debtor.get("phone_whatsapp")
+        if not to:
+            return {
+                "channel": "whatsapp",
+                "delivered": False,
+                "target": None,
+                "error": "debtor has no phone_whatsapp on file",
+            }
+        try:
+            resp = await asyncio.to_thread(twilio_client.send_whatsapp, to, text)
+            return {"channel": "whatsapp", "delivered": True, "target": to, "sid": resp["sid"]}
+        except Exception as e:  # noqa: BLE001
+            log.warning("twilio send failed: %s", e)
+            return {"channel": "whatsapp", "delivered": False, "target": to, "error": str(e)}
 
     return {"channel": "demo", "delivered": False, "target": debtor.get("phone_whatsapp")}
