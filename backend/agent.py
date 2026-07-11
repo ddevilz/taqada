@@ -107,8 +107,8 @@ async def chase_invoice(db, invoice: dict) -> dict:
     # Attempt real delivery on the active channel (best-effort; never raises)
     delivery = await messaging.send_chase(debtor, message)
     # Track last outbound invoice per debtor — used to route inbound Telegram
-    # replies to the right invoice.
-    if delivery.get("channel") == "telegram" and delivery.get("delivered"):
+    # and WhatsApp replies to the right invoice.
+    if delivery.get("channel") in {"telegram", "whatsapp"} and delivery.get("delivered"):
         await db.debtors.update_one(
             {"id": debtor["id"]},
             {"$set": {"last_outbound_invoice_id": invoice["id"]}},
