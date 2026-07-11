@@ -25,6 +25,7 @@ import messaging  # noqa: E402
 import razorpay_client  # noqa: E402
 from seed_data import seed_database  # noqa: E402
 import telegram_client  # noqa: E402
+import twilio_client  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -596,6 +597,50 @@ async def telegram_webhook(request: Request):
         await telegram_client.send_message(
             chat_id, "Thanks — all your invoices with us are settled. Nothing pending."
         )
+        return {"ok": True, "action": "no_open_invoice"}
+
+    result = await handle_inbound_reply(db, invoice_id, text)
+    return {"ok": True, **result}
+
+
+# ============================================================
+# Twilio: WhatsApp webhook (inbound)
+# ============================================================
+
+
+@api.post("/webhooks/twilio")
+async def twilio_webhook(request: Request):
+    form = await request.form()
+    params = dict(form)
+    signature = request.headers.get("X-Twilio-Signature", "")
+
+    public_base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    verify_url = f"{public_base}{request.url.path}" if public_base else str(request.url)
+
+    if not twilio_client.verify_signature(verify_url, params, signature):
+        log.warning("Twilio webhook signature verification FAILED")
+        raise HTTPException(status_code=403, detail="invalid signature")
+
+    from_number = (params.get("From") or "").removeprefix("whatsapp:")
+    text = (params.get("Body") or "").strip()
+    if not from_number or not text:
+        return {"ok": True, "ignored": True}
+
+    debtor = await db.debtors.find_one({"phone_whatsapp": from_number}, {"_id": 0})
+    if not debtor:
+        log.info("Twilio webhook: no debtor matches %s", from_number)
+        return {"ok": True, "action": "unmatched_number"}
+
+    invoice_id = debtor.get("last_outbound_invoice_id")
+    if not invoice_id:
+        inv = await db.invoices.find_one(
+            {"debtor_id": debtor["id"], "status": {"$in": ["unpaid", "promised"]}},
+            {"_id": 0},
+            sort=[("due_date", 1)],
+        )
+        invoice_id = inv["id"] if inv else None
+
+    if not invoice_id:
         return {"ok": True, "action": "no_open_invoice"}
 
     result = await handle_inbound_reply(db, invoice_id, text)

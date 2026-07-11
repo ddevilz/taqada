@@ -239,3 +239,52 @@ def test_mark_paid_updates_recovered(all_invoices):
     assert inv2["status"] == "paid"
     summary_after = requests.get(f"{API}/dashboard/summary").json()
     assert summary_after["recovered_this_week"] >= summary_before["recovered_this_week"] + inv["amount_inr"] - 0.01
+
+
+# -----------------------------------------------------------------------------
+# Twilio WhatsApp webhook (inbound)
+# -----------------------------------------------------------------------------
+from conftest import compute_twilio_signature  # noqa: E402
+
+TWILIO_WEBHOOK_URL = f"{API}/webhooks/twilio"
+
+
+def test_twilio_webhook_rejects_bad_signature():
+    params = {"From": "whatsapp:+919812345001", "Body": "hello", "To": "whatsapp:+14155238886"}
+    r = requests.post(
+        TWILIO_WEBHOOK_URL, data=params,
+        headers={"X-Twilio-Signature": "not-a-real-signature"},
+    )
+    assert r.status_code == 403
+
+
+def test_twilio_webhook_rejects_missing_signature():
+    params = {"From": "whatsapp:+919812345001", "Body": "hello", "To": "whatsapp:+14155238886"}
+    r = requests.post(TWILIO_WEBHOOK_URL, data=params)
+    assert r.status_code == 403
+
+
+def test_twilio_webhook_routes_reply_to_matching_debtor(all_invoices):
+    # Rakesh Sharma, seeded debtor, phone +919812345001 (see backend/seed_data.py)
+    inv = next(i for i in all_invoices if i["debtor"]["phone_whatsapp"] == "+919812345001")
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    assert auth_token, "TWILIO_AUTH_TOKEN must be set on the running backend for this test"
+
+    params = {"From": "whatsapp:+919812345001", "Body": "I will pay in 5 days", "To": "whatsapp:+14155238886"}
+    sig = compute_twilio_signature(auth_token, TWILIO_WEBHOOK_URL, params)
+    r = requests.post(TWILIO_WEBHOOK_URL, data=params, headers={"X-Twilio-Signature": sig})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert d["intent"] == "promise_to_pay"
+
+
+def test_twilio_webhook_unmatched_number_returns_200():
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    assert auth_token, "TWILIO_AUTH_TOKEN must be set on the running backend for this test"
+
+    params = {"From": "whatsapp:+919999999999", "Body": "hello", "To": "whatsapp:+14155238886"}
+    sig = compute_twilio_signature(auth_token, TWILIO_WEBHOOK_URL, params)
+    r = requests.post(TWILIO_WEBHOOK_URL, data=params, headers={"X-Twilio-Signature": sig})
+    assert r.status_code == 200
+    assert r.json().get("action") == "unmatched_number"
