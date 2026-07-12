@@ -40,7 +40,7 @@ services:
     name: taqada-frontend
     runtime: static
     rootDir: frontend
-    buildCommand: npm install --legacy-peer-deps && npm run build
+    buildCommand: corepack enable && yarn install --frozen-lockfile && yarn build
     staticPublishPath: build
     envVars:
       - key: REACT_APP_BACKEND_URL
