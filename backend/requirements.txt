@@ -8,7 +8,7 @@ pymongo==4.6.3
 python-dotenv==1.2.2
 python-multipart==0.0.32
 razorpay==1.4.2
-setuptools>=70
+setuptools>=70,<82
 starlette==0.37.2
 twilio==9.4.3
 uvicorn==0.25.0
